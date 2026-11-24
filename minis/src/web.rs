@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
@@ -45,6 +46,9 @@ const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'un
 /// A request's line and headers are never longer, nor a POST's body.
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 4 * 1024;
+/// An IPA picked on the page (`upload`) is never bigger: the largest apps
+/// people sideload are a few hundred MB.
+const MAX_UPLOAD: u64 = 4 * 1024 * 1024 * 1024;
 /// Connections at once. The page keeps one open and makes one for each
 /// answer; a reload or two more is plenty.
 const MAX_CONNECTIONS: usize = 16;
@@ -186,6 +190,11 @@ struct State {
     /// The progress last sent, so a bar sends one event a percent.
     progress: Option<(String, u64)>,
     ended: bool,
+    /// The question that takes a file from the page, and the folder it goes
+    /// in; the file once it's whole there; whether one is arriving now.
+    upload_to: Option<(u64, PathBuf)>,
+    uploaded: Option<(u64, PathBuf, String)>,
+    uploading: bool,
 }
 
 /// A six-digit code, or what the page asked for instead.
@@ -255,7 +264,13 @@ impl Server {
     }
 
     /// Ask the page, and wait for its answer, however long it takes.
-    fn ask(&self, mut question: Value) -> Value {
+    fn ask(&self, question: Value) -> Value {
+        self.ask_id(question, None).1
+    }
+
+    /// `ask`, with the question's id. With `upload`, the page may send a file
+    /// for it, into that folder (`upload`).
+    fn ask_id(&self, mut question: Value, upload: Option<&Path>) -> (u64, Value) {
         let shared = &self.shared;
         let mut state = shared.lock();
         state.questions += 1;
@@ -264,6 +279,7 @@ impl Server {
         question["id"] = json!(id);
         state.asking = Some(id);
         state.answer = None;
+        state.upload_to = upload.map(|dir| (id, dir.to_path_buf()));
         shared.push(&mut state, question);
         let answer = loop {
             if let Some(answer) = state.answer.take() {
@@ -275,8 +291,29 @@ impl Server {
                 .unwrap_or_else(|e| e.into_inner());
         };
         state.asking = None;
+        state.upload_to = None;
         shared.push(&mut state, json!({"t": "answered", "id": id}));
-        answer
+        (id, answer)
+    }
+
+    /// A file from this iPhone, picked on the page and sent to siboot into
+    /// `dir`: its path there and the name it had. None when the page
+    /// cancels.
+    pub fn file(&self, title: &str, notes: &[&str], dir: &Path) -> Option<(PathBuf, String)> {
+        loop {
+            let (id, answer) = self.ask_id(
+                json!({"kind": "file", "question": title, "notes": notes, "button": "Choose .ipa"}),
+                Some(dir),
+            );
+            if cancelled(&answer) {
+                return None;
+            }
+            let mut state = self.shared.lock();
+            match state.uploaded.take() {
+                Some((of, path, name)) if of == id => return Some((path, name)),
+                _ => {}
+            }
+        }
     }
 
     /// A line of text, or a password with `secret`. None when the page
@@ -501,16 +538,24 @@ impl Request {
     }
 }
 
-/// One request off `stream`, or the status that refuses it.
-fn read_request(stream: &TcpStream) -> Result<Request, u16> {
+fn timed_out(e: io::Error) -> u16 {
+    match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => 408,
+        _ => 400,
+    }
+}
+
+/// Whether `target` is a file sent from the page, whose body `upload` reads
+/// as it arrives rather than all at once.
+fn is_upload(target: &str) -> bool {
+    target.split('?').next().unwrap_or("").ends_with("/upload")
+}
+
+/// One request off `stream`, or the status that refuses it. An upload's body
+/// is left in the reader.
+fn read_request(stream: &TcpStream) -> Result<(Request, BufReader<&TcpStream>), u16> {
     let _ = stream.set_read_timeout(Some(READ_WAIT));
     let mut reader = BufReader::new(stream);
-    let timed_out = |e: io::Error| -> u16 {
-        match e.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => 408,
-            _ => 400,
-        }
-    };
     let mut lines = Vec::new();
     let mut read = 0;
     loop {
@@ -556,6 +601,9 @@ fn read_request(stream: &TcpStream) -> Result<Request, u16> {
         headers,
         body: Vec::new(),
     };
+    if is_upload(&request.target) && request.method == "POST" {
+        return Ok((request, reader));
+    }
     if let Some(length) = request.header("content-length") {
         let length: usize = length.parse().map_err(|_| 400u16)?;
         if length > MAX_BODY {
@@ -565,14 +613,14 @@ fn read_request(stream: &TcpStream) -> Result<Request, u16> {
         reader.read_exact(&mut body).map_err(timed_out)?;
         request.body = body;
     }
-    Ok(request)
+    Ok((request, reader))
 }
 
 fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(WRITE_WAIT));
-    let request = match read_request(&stream) {
-        Ok(request) => request,
+    let (request, body) = match read_request(&stream) {
+        Ok(read) => read,
         Err(status) => {
             refuse(&stream, status)?;
             linger(&stream);
@@ -607,7 +655,14 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
         ("GET", "/events") => events(shared, &stream, &request),
         ("POST", "/answer") => answer(shared, &stream, &request),
         ("POST", "/stop") => stop(shared, &stream, &request),
-        (_, "" | "/" | "/events" | "/answer" | "/stop") => refuse(&stream, 405),
+        ("POST", "/upload") => {
+            let refused = upload(shared, &stream, &request, body)?;
+            if refused {
+                linger(&stream);
+            }
+            Ok(())
+        }
+        (_, "" | "/" | "/events" | "/answer" | "/stop" | "/upload") => refuse(&stream, 405),
         _ => refuse(&stream, 404),
     }
 }
@@ -651,6 +706,143 @@ fn answer(shared: &Shared, stream: &TcpStream, request: &Request) -> io::Result<
     };
     // 409: answered already, or not asked.
     respond(stream, if taken { 204 } else { 409 }, &[], b"")
+}
+
+/// A file picked on the page, for the question that asks for one
+/// (`Server::file`): `upload?id=N&name=NAME`, the file itself as the body.
+/// It goes into that question's folder under its own name, made safe
+/// (library.rs), through a `.part` file, and answers the question once it's
+/// whole and starts as a zip does. Returns whether it was refused before its
+/// body was read, so the caller lets the refusal out.
+///
+/// The body must be `application/octet-stream`: no form on another site can
+/// send that without a preflight, which is refused, and it must come from
+/// this page's origin when the browser names one, as any POST.
+fn upload(
+    shared: &Shared,
+    stream: &TcpStream,
+    request: &Request,
+    mut body: BufReader<&TcpStream>,
+) -> io::Result<bool> {
+    if let Some(origin) = request.header("origin") {
+        if !shared.is_own_origin(origin) {
+            refuse(stream, 403)?;
+            return Ok(true);
+        }
+    }
+    let octets = request.header("content-type").is_some_and(|t| {
+        t.trim()
+            .to_ascii_lowercase()
+            .starts_with("application/octet-stream")
+    });
+    if !octets {
+        refuse(stream, 415)?;
+        return Ok(true);
+    }
+    let query = request.target.split_once('?').map_or("", |(_, q)| q);
+    let field = |key: &str| {
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| crate::library::percent_decode(&v.replace('+', " ")))
+    };
+    let (Some(id), Some(name)) = (field("id").and_then(|id| id.parse::<u64>().ok()), field("name"))
+    else {
+        refuse(stream, 400)?;
+        return Ok(true);
+    };
+    let Some(length) = request
+        .header("content-length")
+        .and_then(|l| l.trim().parse::<u64>().ok())
+    else {
+        refuse(stream, 411)?;
+        return Ok(true);
+    };
+    if length > MAX_UPLOAD {
+        refuse(stream, 413)?;
+        return Ok(true);
+    }
+    // Only for the question asking for a file, one file at a time.
+    let dir = {
+        let mut state = shared.lock();
+        match &state.upload_to {
+            Some((of, dir))
+                if *of == id
+                    && state.asking == Some(id)
+                    && state.answer.is_none()
+                    && !state.uploading =>
+            {
+                let dir = dir.clone();
+                state.uploading = true;
+                dir
+            }
+            _ => {
+                drop(state);
+                refuse(stream, 409)?;
+                return Ok(true);
+            }
+        }
+    };
+    let name = crate::library::safe_name(&name);
+    let path = dir.join(&name);
+    let partial = dir.join(format!("{name}.part"));
+    let received = receive(&mut body, &partial, length);
+    let status = match received {
+        Ok(()) if !is_zip_file(&partial) => 415,
+        Ok(()) => {
+            let mut state = shared.lock();
+            if state.asking == Some(id) && state.answer.is_none() {
+                match std::fs::rename(&partial, &path) {
+                    Ok(()) => {
+                        state.uploaded = Some((id, path, name));
+                        state.answer = Some(json!({"id": id, "uploaded": true}));
+                        shared.changed.notify_all();
+                        204
+                    }
+                    Err(_) => 500,
+                }
+            } else {
+                // Cancelled, or answered from another copy of the page.
+                409
+            }
+        }
+        Err(status) => status,
+    };
+    let _ = std::fs::remove_file(&partial);
+    shared.lock().uploading = false;
+    if status == 204 {
+        respond(stream, 204, &[], b"")?;
+    } else {
+        refuse(stream, status)?;
+    }
+    Ok(false)
+}
+
+/// `length` bytes of `body` into `partial`.
+fn receive(body: &mut impl Read, partial: &Path, length: u64) -> Result<(), u16> {
+    let mut file = std::fs::File::create(partial).map_err(|_| 500u16)?;
+    let mut left = length;
+    let mut buffer = vec![0u8; 256 * 1024];
+    while left > 0 {
+        let want = buffer.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        let n = body.read(&mut buffer[..want]).map_err(timed_out)?;
+        if n == 0 {
+            return Err(400);
+        }
+        file.write_all(&buffer[..n]).map_err(|_| 500u16)?;
+        left -= n as u64;
+    }
+    file.flush().map_err(|_| 500u16)
+}
+
+/// An IPA is a zip.
+fn is_zip_file(path: &Path) -> bool {
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && &magic == b"PK\x03\x04"
 }
 
 fn stop(shared: &Shared, stream: &TcpStream, request: &Request) -> io::Result<()> {
@@ -786,9 +978,11 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
         431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
         _ => "Error",
     }
 }
@@ -1236,6 +1430,99 @@ mod tests {
         let question = until(&mut reader, "ask");
         reply(server, question["id"].as_u64().unwrap(), json!({"cancel": true}));
         assert!(!cancelled.join().unwrap());
+    }
+
+    /// Sends `body` as a file for question `id`, named `name`: the status.
+    fn send_file(server: &Server, id: u64, name: &str, body: &[u8], extra: &str) -> u16 {
+        let mut stream = TcpStream::connect(("127.0.0.1", server.shared.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let head = format!(
+            "POST {}/upload?id={id}&name={name} HTTP/1.1\r\nHost: {}\r\n\
+             Content-Length: {}\r\n{extra}\r\n",
+            base(server),
+            host(server),
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let _ = stream.write_all(body);
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply);
+        String::from_utf8_lossy(&reply)
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    const OCTETS: &str = "Content-Type: application/octet-stream\r\n";
+
+    fn upload_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("siboot-upload-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_file_is_taken_only_for_the_question_asking_for_one() {
+        let server = leaked();
+        let dir = upload_dir("taken");
+        let ipa = b"PK\x03\x04 an app".to_vec();
+        // Nothing asks yet.
+        assert_eq!(send_file(server, 1, "App.ipa", &ipa, OCTETS), 409);
+
+        let mut reader = subscribe(server, None);
+        let into = dir.clone();
+        let picked = asked(server, move |s| s.file("pick the .ipa", &["It's kept."], &into));
+        let question = until(&mut reader, "ask");
+        assert_eq!(question["kind"], "file");
+        assert_eq!(question["notes"][0], "It's kept.");
+        let id = question["id"].as_u64().unwrap();
+
+        // Not for another question, not as a form, not from another site, and
+        // not anything but a zip.
+        assert_eq!(send_file(server, id + 1, "App.ipa", &ipa, OCTETS), 409);
+        assert_eq!(
+            send_file(server, id, "App.ipa", &ipa, "Content-Type: multipart/form-data\r\n"),
+            415
+        );
+        let elsewhere = format!("{OCTETS}Origin: https://example.com\r\n");
+        assert_eq!(send_file(server, id, "App.ipa", &ipa, &elsewhere), 403);
+        assert_eq!(send_file(server, id, "App.ipa", b"<html>", OCTETS), 415);
+        assert_eq!(send_file(server, id, "App.ipa", &ipa[..2], OCTETS), 415);
+        assert!(!dir.join("App.ipa").exists());
+        assert!(!dir.join("App.ipa.part").exists());
+        // A plain answer can't name a file instead.
+        assert_eq!(reply(server, id, json!({"path": "/etc/passwd"})), 204);
+        let question = until(&mut reader, "ask");
+        let id = question["id"].as_u64().unwrap();
+
+        // Its name is made safe, and the question is answered with it.
+        let own = format!("{OCTETS}Origin: http://{}\r\n", host(server));
+        assert_eq!(send_file(server, id, "..%2F..%2FMy%20App.ipa", &ipa, &own), 204);
+        let (path, name) = picked.join().unwrap().unwrap();
+        assert_eq!(name, "My App.ipa");
+        assert_eq!(path, dir.join("My App.ipa"));
+        assert_eq!(std::fs::read(&path).unwrap(), ipa);
+        assert!(!dir.join("My App.ipa.part").exists());
+        // Answered: no more.
+        assert_eq!(send_file(server, id, "Other.ipa", &ipa, OCTETS), 409);
+    }
+
+    #[test]
+    fn picking_a_file_can_be_cancelled() {
+        let server = leaked();
+        let dir = upload_dir("cancelled");
+        let mut reader = subscribe(server, None);
+        let into = dir.clone();
+        let picked = asked(server, move |s| s.file("pick the .ipa", &[], &into));
+        let question = until(&mut reader, "ask");
+        reply(server, question["id"].as_u64().unwrap(), json!({"cancel": true}));
+        assert_eq!(picked.join().unwrap(), None);
+        assert!(is_upload("/key/upload?id=1"));
+        assert!(!is_upload("/key/answer"));
     }
 
     #[test]

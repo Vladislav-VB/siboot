@@ -1075,6 +1075,19 @@ fn choose_prompt(title: &str, options: &[String]) -> Option<usize> {
     picked
 }
 
+/// A file picked on the page from this iPhone's own files, and sent to
+/// siboot into `dir`: its path there and the name it had. Only the page can
+/// pick one; None without it, or when it's cancelled.
+pub fn pick_file(
+    title: &str,
+    notes: &[&str],
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, String)> {
+    let picked = web::page().and_then(|page| page.file(title, notes, dir));
+    record_answer(title, picked.as_ref().map(|(_, name)| name.as_str()));
+    picked
+}
+
 /// A line from the terminal, as plain output asks: None at the end of input.
 /// With the page, the page asks for it.
 pub fn ask(prompt: &str) -> Option<String> {

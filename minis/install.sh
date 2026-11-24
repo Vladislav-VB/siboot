@@ -1,34 +1,45 @@
 #!/bin/sh
 # Installs siboot into Open Minis and runs it, which pairs this iPhone with
-# itself (Open Minis 1.16 and later; siboot stops in an older one), signs
-# SideInstaller with your Apple Account and installs it.
+# itself (Open Minis 1.16 and later; siboot stops in an older one), asks what
+# to install (SideInstaller, SideStore, LiveContainer + SideStore, or an .ipa
+# of your own), signs it with your Apple Account and installs it.
 #
-# In Minis's terminal (Minis › Settings › Terminal):
+# This is Vladislav-VB's siboot, a fork of FrizzleM/siboot. In Minis's
+# terminal (Minis › Settings › Terminal):
 #
-#   wget -qO- https://raw.githubusercontent.com/FrizzleM/siboot/main/minis/install.sh | sh
+#   wget -qO- https://raw.githubusercontent.com/Vladislav-VB/siboot/main/minis/install.sh | sh
 #
 # Where raw.githubusercontent.com is blocked (mainland China, Iran), the same
 # script through jsDelivr:
 #
-#   wget -qO- https://fastly.jsdelivr.net/gh/FrizzleM/siboot@main/minis/install.sh | sh
+#   wget -qO- https://fastly.jsdelivr.net/gh/Vladislav-VB/siboot@main/minis/install.sh | sh
+#
+# SIBOOT_REF takes siboot from another branch, the same one the script came
+# from:
+#
+#   wget -qO- https://raw.githubusercontent.com/Vladislav-VB/siboot/BRANCH/minis/install.sh | SIBOOT_REF=BRANCH sh
 #
 # Afterwards `siboot` runs it again, without downloading.
 set -eu
+
+# The repository and the branch bin/siboot-aarch64 comes from.
+REPO="Vladislav-VB/siboot"
+REF="${SIBOOT_REF:-main}"
 
 # Where bin/siboot-aarch64 comes from, tried in order: GitHub, then the same
 # file through jsDelivr's CDNs, which can get through where GitHub's raw files
 # don't. Whichever answers, the copy has to match SHA256, so a mirror can't
 # change what runs. SIBOOT_BASE replaces the list (one URL, or several).
-SOURCES="https://raw.githubusercontent.com/FrizzleM/siboot/main/minis
-https://fastly.jsdelivr.net/gh/FrizzleM/siboot@main/minis
-https://gcore.jsdelivr.net/gh/FrizzleM/siboot@main/minis
-https://cdn.jsdelivr.net/gh/FrizzleM/siboot@main/minis"
+SOURCES="https://raw.githubusercontent.com/$REPO/$REF/minis
+https://fastly.jsdelivr.net/gh/$REPO@$REF/minis
+https://gcore.jsdelivr.net/gh/$REPO@$REF/minis
+https://cdn.jsdelivr.net/gh/$REPO@$REF/minis"
 SOURCES="${SIBOOT_BASE:-$SOURCES}"
 # Of bin/siboot-aarch64, updated with it: a download that doesn't match (an
 # error page, a cut-off transfer, a stale mirror) is never run. SIZE only
 # draws the progress bar.
-SHA256="05d0a2ef07f99caca762efc6a6e4a7a8b1a691186dd1158759bf18755093c760"
-SIZE=12209056
+SHA256="6c41b630f78d774ae3a54e0cd373a69b98ab37a25c242c3ebac0ef7d90495109"
+SIZE=12326472
 
 DIR="$HOME/.siboot/bin"
 BIN="$DIR/siboot"

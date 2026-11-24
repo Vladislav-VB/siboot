@@ -19,6 +19,8 @@ pub struct Signed {
     pub name: String,
     /// `CFBundleShortVersionString`, when it has one.
     pub version: Option<String>,
+    /// A URL scheme it opens with, for the page's button.
+    pub scheme: Option<String>,
 }
 
 pub async fn sign(session: &mut Session, ipa: &Path, device: &DeviceInfo) -> Result<Signed> {
@@ -39,12 +41,14 @@ pub async fn sign(session: &mut Session, ipa: &Path, device: &DeviceInfo) -> Res
             Fail::new(sign_advice(&text), text)
         })?;
     let (bundle_id, name, version) = bundle_info(&app_dir)?;
+    let scheme = url_scheme(&app_dir);
     ui::ok(&format!("signed {name} as {bundle_id}"));
     Ok(Signed {
         app_dir,
         bundle_id,
         name,
         version,
+        scheme,
     })
 }
 
@@ -87,9 +91,27 @@ fn bundle_info(app_dir: &Path) -> Result<(String, String, Option<String>)> {
     let name = text("CFBundleDisplayName")
         .filter(|n| !n.is_empty())
         .or_else(|| text("CFBundleName"))
-        .unwrap_or_else(|| "SideInstaller".into());
+        .unwrap_or_else(|| "The app".into());
     let version = text("CFBundleShortVersionString").filter(|v| !v.is_empty());
     Ok((bundle_id, name, version))
+}
+
+/// The first URL scheme the app declares (`CFBundleURLTypes`), if any.
+fn url_scheme(app_dir: &Path) -> Option<String> {
+    let info: plist::Dictionary = plist::from_file(app_dir.join("Info.plist")).ok()?;
+    info.get("CFBundleURLTypes")?
+        .as_array()?
+        .iter()
+        .filter_map(|t| t.as_dictionary()?.get("CFBundleURLSchemes")?.as_array())
+        .flatten()
+        .filter_map(|s| s.as_string())
+        .map(str::trim)
+        .find(|s| {
+            !s.is_empty()
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+                && s.starts_with(|c: char| c.is_ascii_alphabetic())
+        })
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -117,5 +139,18 @@ mod tests {
         info.insert("CFBundleShortVersionString".into(), "1.7.0".into());
         plist::to_file_xml(dir.join("Info.plist"), &info).unwrap();
         assert_eq!(bundle_info(&dir).unwrap().2.as_deref(), Some("1.7.0"));
+
+        assert_eq!(url_scheme(&dir), None);
+        let mut kind = plist::Dictionary::new();
+        kind.insert(
+            "CFBundleURLSchemes".into(),
+            plist::Value::Array(vec!["bad scheme".into(), "sideinstaller".into()]),
+        );
+        info.insert(
+            "CFBundleURLTypes".into(),
+            plist::Value::Array(vec![plist::Value::Dictionary(kind)]),
+        );
+        plist::to_file_xml(dir.join("Info.plist"), &info).unwrap();
+        assert_eq!(url_scheme(&dir).as_deref(), Some("sideinstaller"));
     }
 }

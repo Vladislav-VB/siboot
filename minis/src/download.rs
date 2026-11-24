@@ -29,12 +29,83 @@ use crate::{ui, Args, VERSION};
 pub const RELEASE_IPA: &str =
     "https://github.com/FrizzleM/SideInstaller/releases/latest/download/SideInstaller.ipa";
 
-/// The kept release, and what it is.
-const KEPT_IPA: &str = "SideInstaller.ipa";
-const KEPT_INFO: &str = "SideInstaller.json";
-/// An IPA from `--ipa URL`: downloaded on every run, never taken for the kept
-/// release.
-const OTHER_IPA: &str = "other.ipa";
+/// An app siboot knows where to get, and how it's kept in ~/.siboot/downloads.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Release {
+    /// "SideStore", for what siboot says.
+    pub name: &'static str,
+    /// The kept copy's name, without ".ipa" (and with ".json", its
+    /// description).
+    pub kept: &'static str,
+    /// Where GitHub has it.
+    pub url: &'static str,
+    pub track: Track,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Track {
+    /// `releases/latest/download/…`: GitHub's redirect names the release, so
+    /// a kept copy of the latest isn't downloaded again.
+    Latest,
+    /// A fixed tag that's rebuilt in place (SideStore's `nightly`): nothing
+    /// says whether it changed, so it's downloaded every run, and the kept
+    /// copy is for when GitHub doesn't answer.
+    Nightly,
+    /// One file, known by its SHA-256: downloaded once, and refused if it's
+    /// anything else.
+    Pinned(&'static str),
+}
+
+pub const SIDEINSTALLER: Release = Release {
+    name: "SideInstaller",
+    kept: "SideInstaller",
+    url: RELEASE_IPA,
+    track: Track::Latest,
+};
+
+/// SideStore's latest release, as SideInstaller's stable channel installs it.
+pub const SIDESTORE: Release = Release {
+    name: "SideStore",
+    kept: "SideStore",
+    url: "https://github.com/SideStore/SideStore/releases/latest/download/SideStore.ipa",
+    track: Track::Latest,
+};
+
+/// SideStore's nightly: from 20 September 2026 on it reads the RPPairing
+/// record, the only kind a pairing on iOS 27 has.
+pub const SIDESTORE_NIGHTLY: Release = Release {
+    name: "SideStore nightly",
+    kept: "SideStore-nightly",
+    url: "https://github.com/SideStore/SideStore/releases/download/nightly/SideStore.ipa",
+    track: Track::Nightly,
+};
+
+/// LiveContainer with SideStore built in. GitHub has hidden LiveContainer's
+/// organization since October 2026, so this is the copy SideInstaller
+/// installs (`InstallSource.mirror`): its last nightly (18 September 2026),
+/// taken only by the hash recorded for the official asset before the
+/// takedown.
+pub const LIVECONTAINER: Release = Release {
+    name: "LiveContainer + SideStore",
+    kept: "LiveContainer+SideStore",
+    url: "https://github.com/LiveContainerMirror/LiveContainer/releases/download/nightly/LiveContainer+SideStore.ipa",
+    track: Track::Pinned("bec41bc21d75a0f2e85a0aa589ce5772e24e410deb017486758a3bc0503c8de7"),
+};
+
+impl Release {
+    fn ipa(&self) -> String {
+        format!("{}.ipa", self.kept)
+    }
+
+    fn info(&self) -> String {
+        format!("{}.json", self.kept)
+    }
+}
+
+/// An IPA from `--ipa URL`, or a link picked in the menu: kept in
+/// ~/.siboot/library under its own name (library.rs), so the menu offers it
+/// again.
+const DOWNLOADED_IPA: &str = "download.ipa";
 
 /// Where GitHub is blocked, a connection to it hangs rather than fails.
 const CONNECT: Duration = Duration::from_secs(20);
@@ -43,13 +114,16 @@ const LOOKUP: Duration = Duration::from_secs(20);
 /// A download that sends nothing for this long has stalled.
 const STALL: Duration = Duration::from_secs(30);
 
-/// How to get SideInstaller where GitHub is blocked. Apple's sign-in server
+/// How to get `name` where GitHub is blocked. Apple's sign-in server
 /// answered before this is said, so the internet itself works.
-const WHERE_BLOCKED: &str =
-    "Where GitHub is blocked, turn on a VPN that reaches it and run siboot again: it gets \
-     SideInstaller first, then asks you to switch to LocalDevVPN, and keeps it for the runs \
-     after. Or put SideInstaller.ipa in a folder you mount in Minis (Settings › Mount External \
-     Folders) and run siboot --ipa /var/minis/mounts/<folder>/SideInstaller.ipa.";
+fn where_blocked(name: &str) -> String {
+    format!(
+        "Where GitHub is blocked, turn on a VPN that reaches it and run siboot again: it gets \
+         {name} first, then asks you to switch to LocalDevVPN, and keeps it for the runs after. \
+         Or put the .ipa in a folder you mount in Minis (Settings › Mount External Folders) and \
+         pick it under An .ipa of your own, or run siboot --ipa /var/minis/mounts/<folder>/<file>.ipa."
+    )
+}
 
 /// What step 1 does about the IPA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,21 +138,40 @@ pub enum Mode {
 #[derive(Debug)]
 pub struct Ipa {
     pub path: PathBuf,
-    /// SideInstaller's release, as GitHub tags it ("v2.1.1"). None for one
-    /// from `--ipa`.
+    /// The release, as GitHub tags it ("v2.1.1", or "nightly"). None for one
+    /// from `--ipa`. Its name says it; the tests check it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub release: Option<String>,
     /// GitHub answered in this run. Where it's blocked, that means a VPN
     /// other than LocalDevVPN is on now.
     pub github: bool,
+    /// "SideInstaller 2.1.1", "SideStore nightly", "Delta.ipa".
+    title: String,
 }
 
 impl Ipa {
     /// "SideInstaller 2.1.1", for step 1's summary.
     pub fn name(&self) -> String {
-        match &self.release {
-            Some(tag) => format!("SideInstaller {}", version(tag)),
-            None => "your IPA".into(),
+        self.title.clone()
+    }
+
+    /// One the user gave: not a release siboot knows.
+    fn own(path: PathBuf) -> Ipa {
+        Ipa {
+            title: "your IPA".into(),
+            path,
+            release: None,
+            github: false,
         }
+    }
+}
+
+/// "SideInstaller 2.1.1" for the release tagged "v2.1.1"; a nightly's tag is
+/// in its name already.
+fn titled(app: &Release, tag: &str) -> String {
+    match app.track {
+        Track::Latest => format!("{} {}", app.name, version(tag)),
+        Track::Nightly | Track::Pinned(_) => app.name.to_string(),
     }
 }
 
@@ -92,26 +185,48 @@ struct Kept {
     sha256: String,
 }
 
-/// `--ipa` as a path, or the URL it names, or SideInstaller's latest release.
+/// `--ipa` as a path, or the URL it names, or the release of the app picked
+/// (SideInstaller's, when none was).
 pub async fn get(args: &Args, mode: Mode) -> Result<Ipa> {
-    get_from(args.ipa.as_deref(), &args.home, mode, RELEASE_IPA).await
+    let app = args.app.map_or(&SIDEINSTALLER, |app| app.release());
+    get_app(args.ipa.as_deref(), &args.home, mode, app, app.url).await
 }
 
-/// `get`, with GitHub's address for the latest release given.
+/// `get` for SideInstaller, with GitHub's address for the latest release
+/// given.
+#[cfg(test)]
 async fn get_from(ipa: Option<&str>, home: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
+    get_app(ipa, home, mode, &SIDEINSTALLER, latest).await
+}
+
+/// `get` for `app`, from `url`.
+async fn get_app(
+    ipa: Option<&str>,
+    home: &Path,
+    mode: Mode,
+    app: &Release,
+    url: &str,
+) -> Result<Ipa> {
     match ipa {
         Some(path) if !is_url(path) => {
             let path = PathBuf::from(path);
             check_ipa(&path)?;
             ui::ok(&format!("using {}", path.display()));
-            Ok(Ipa {
-                path,
-                release: None,
-                github: false,
-            })
+            let mut ipa = Ipa::own(path);
+            if let Some(name) = ipa.path.file_name().and_then(|n| n.to_str()) {
+                ipa.title = name.to_string();
+            }
+            Ok(ipa)
         }
-        Some(url) => from_url(url, &downloads(home)?, mode).await,
-        None => release(&downloads(home)?, mode, latest).await,
+        Some(link) => from_url(link, &crate::library::dir(home)?, mode).await,
+        None => {
+            let dir = downloads(home)?;
+            match app.track {
+                Track::Latest => release(&dir, mode, app, url).await,
+                Track::Nightly => nightly(&dir, mode, app, url).await,
+                Track::Pinned(sha256) => pinned(&dir, mode, app, url, sha256).await,
+            }
+        }
     }
 }
 
@@ -126,16 +241,18 @@ fn downloads(home: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// SideInstaller's latest release: kept already, downloaded now, or, when
-/// GitHub can't give it, the one kept from an earlier run.
-async fn release(dir: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
-    let path = dir.join(KEPT_IPA);
+/// `app`'s latest release: kept already, downloaded now, or, when GitHub
+/// can't give it, the one kept from an earlier run.
+async fn release(dir: &Path, mode: Mode, app: &Release, latest: &str) -> Result<Ipa> {
+    let name = app.name;
+    let path = dir.join(app.ipa());
     let ipa = |release: String, github: bool| Ipa {
         path: path.clone(),
+        title: titled(app, &release),
         release: Some(release),
         github,
     };
-    let kept = kept(dir);
+    let kept = kept(dir, app);
     if let Some(k) = &kept {
         ui::detail(&format!(
             "kept from an earlier run: {} ({} bytes, SHA-256 {})",
@@ -144,26 +261,23 @@ async fn release(dir: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
     }
 
     // What becomes of the kept copy when GitHub can't give a newer one.
-    let installs = match mode {
-        Mode::Get => "siboot installs",
-        Mode::Look => "a run would install",
-    };
+    let installs = installs(mode);
 
-    ui::activity("asking GitHub for SideInstaller's latest release");
+    ui::activity(&format!("asking GitHub for {name}'s latest release"));
     let (tag, url) = match latest_release(latest).await {
         Ok(found) => found,
         Err(raw) => {
             let Some(k) = kept else {
                 return Err(Fail::new(
                     format!(
-                        "Couldn't reach GitHub, where siboot gets SideInstaller. {WHERE_BLOCKED}"
+                        "Couldn't reach GitHub, where siboot gets {name}. {}",
+                        where_blocked(name)
                     ),
                     raw,
                 ));
             };
             ui::warn(&format!(
-                "Couldn't reach GitHub, so {installs} SideInstaller {}, downloaded on an earlier \
-                 run.",
+                "Couldn't reach GitHub, so {installs} {name} {}, downloaded on an earlier run.",
                 version(&k.release)
             ));
             ui::detail(&raw);
@@ -173,7 +287,7 @@ async fn release(dir: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
     ui::detail(&format!("the latest release is {tag}"));
     if kept.as_ref().is_some_and(|k| k.release == tag) {
         ui::ok(&format!(
-            "SideInstaller {}, the latest, is downloaded already",
+            "{name} {}, the latest, is downloaded already",
             version(&tag)
         ));
         return Ok(ipa(tag, true));
@@ -184,28 +298,23 @@ async fn release(dir: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
             ui::activity("reaching GitHub's download");
             reachable(&url).await.map(|()| {
                 ui::ok(&format!(
-                    "GitHub answers, and SideInstaller {} is there to download",
+                    "GitHub answers, and {name} {} is there to download",
                     version(&tag)
                 ))
             })
         }
         Mode::Get => {
-            ui::status(&format!("downloading SideInstaller {}", version(&tag)));
-            download(&url, &path).await.map(|got| {
-                let kept = Kept {
-                    release: tag.clone(),
-                    size: got.size,
-                    sha256: got.sha256,
-                };
-                if let Err(e) = keep(dir, &kept) {
-                    ui::detail(&format!("couldn't write {KEPT_INFO}: {e}"));
-                }
-                ui::ok(&format!(
-                    "downloaded SideInstaller {} ({})",
-                    version(&tag),
-                    megabytes(got.size)
-                ));
-            })
+            ui::status(&format!("downloading {name} {}", version(&tag)));
+            download(&url, &path)
+                .await
+                .map(|got| {
+                    keep_or_say(dir, app, &tag, &got);
+                    ui::ok(&format!(
+                        "downloaded {name} {} ({})",
+                        version(&tag),
+                        megabytes(got.size)
+                    ));
+                })
         }
     };
     let raw = match got {
@@ -213,12 +322,15 @@ async fn release(dir: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
         Err(raw) => raw,
     };
     let missed = match mode {
-        Mode::Get => format!("download SideInstaller {} from GitHub", version(&tag)),
-        Mode::Look => format!("reach SideInstaller {}'s download on GitHub", version(&tag)),
+        Mode::Get => format!("download {name} {} from GitHub", version(&tag)),
+        Mode::Look => format!("reach {name} {}'s download on GitHub", version(&tag)),
     };
     let Some(k) = kept else {
         return Err(Fail::new(
-            format!("Couldn't {missed}. Try again in a minute. {WHERE_BLOCKED}"),
+            format!(
+                "Couldn't {missed}. Try again in a minute. {}",
+                where_blocked(name)
+            ),
             raw,
         ));
     };
@@ -230,9 +342,139 @@ async fn release(dir: &Path, mode: Mode, latest: &str) -> Result<Ipa> {
     Ok(ipa(k.release, true))
 }
 
-/// An IPA from `--ipa URL`, downloaded again on every run.
+/// A build on a fixed tag, rebuilt in place: downloaded every run, since
+/// nothing says it changed, and the kept copy installed when GitHub can't give
+/// it.
+async fn nightly(dir: &Path, mode: Mode, app: &Release, url: &str) -> Result<Ipa> {
+    let name = app.name;
+    let path = dir.join(app.ipa());
+    let ipa = |github: bool| Ipa {
+        path: path.clone(),
+        title: name.to_string(),
+        release: Some("nightly".into()),
+        github,
+    };
+    let kept = kept(dir, app);
+    let got = match mode {
+        Mode::Look => {
+            ui::activity(&format!("reaching {name} on GitHub"));
+            reachable(url)
+                .await
+                .map(|()| ui::ok(&format!("GitHub answers, and {name} is there to download")))
+        }
+        Mode::Get => {
+            ui::status(&format!("downloading {name}"));
+            download(url, &path).await.map(|got| {
+                keep_or_say(dir, app, "nightly", &got);
+                ui::ok(&format!("downloaded {name} ({})", megabytes(got.size)));
+            })
+        }
+    };
+    let raw = match got {
+        Ok(()) => return Ok(ipa(true)),
+        Err(raw) => raw,
+    };
+    if kept.is_none() {
+        return Err(Fail::new(
+            format!(
+                "Couldn't download {name} from GitHub. Try again in a minute. {}",
+                where_blocked(name)
+            ),
+            raw,
+        ));
+    }
+    ui::warn(&format!(
+        "Couldn't download {name} from GitHub, so {} the copy downloaded on an earlier run.",
+        installs(mode)
+    ));
+    ui::detail(&raw);
+    Ok(ipa(false))
+}
+
+/// One file known by its SHA-256: the kept copy when it's that file,
+/// downloaded otherwise, and refused when what arrives isn't.
+async fn pinned(dir: &Path, mode: Mode, app: &Release, url: &str, sha256: &str) -> Result<Ipa> {
+    let name = app.name;
+    let path = dir.join(app.ipa());
+    let ipa = |github: bool| Ipa {
+        path: path.clone(),
+        title: name.to_string(),
+        release: Some("pinned".into()),
+        github,
+    };
+    if kept(dir, app).is_some_and(|k| k.sha256 == sha256) {
+        ui::ok(&format!("{name} is downloaded already"));
+        return Ok(ipa(false));
+    }
+    let got = match mode {
+        Mode::Look => {
+            ui::activity(&format!("reaching {name} on GitHub"));
+            reachable(url)
+                .await
+                .map(|()| ui::ok(&format!("GitHub answers, and {name} is there to download")))
+        }
+        Mode::Get => {
+            ui::status(&format!("downloading {name}"));
+            match download(url, &path).await {
+                Ok(got) if got.sha256 == sha256 => {
+                    keep_or_say(dir, app, "pinned", &got);
+                    ui::ok(&format!(
+                        "downloaded {name} ({}), the file SideInstaller installs",
+                        megabytes(got.size)
+                    ));
+                    Ok(())
+                }
+                Ok(got) => {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(Fail::new(
+                        format!(
+                            "The {name} that arrived isn't the file siboot installs (its SHA-256 \
+                             differs), so siboot won't install it."
+                        ),
+                        format!("SHA-256 {}, expected {sha256}", got.sha256),
+                    ));
+                }
+                Err(raw) => Err(raw),
+            }
+        }
+    };
+    got.map(|()| ipa(true)).map_err(|raw| {
+        Fail::new(
+            format!(
+                "Couldn't download {name} from GitHub. Try again in a minute. {}",
+                where_blocked(name)
+            ),
+            raw,
+        )
+    })
+}
+
+fn installs(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Get => "siboot installs",
+        Mode::Look => "a run would install",
+    }
+}
+
+/// Describe what's kept now, saying so when that fails: the file is whole
+/// either way, but won't be taken for kept.
+fn keep_or_say(dir: &Path, app: &Release, release: &str, got: &Got) {
+    let kept = Kept {
+        release: release.to_string(),
+        size: got.size,
+        sha256: got.sha256.clone(),
+    };
+    if let Err(e) = keep(dir, app, &kept) {
+        ui::detail(&format!("couldn't write {}: {e}", app.info()));
+    }
+}
+
+/// An IPA from a link: downloaded into the library, under the name the link
+/// gives it, so the menu offers it on the runs after.
 async fn from_url(url: &str, dir: &Path, mode: Mode) -> Result<Ipa> {
     let host = host_of(url);
+    let file = crate::library::name_from_url(url).unwrap_or_else(|| DOWNLOADED_IPA.into());
+    let path = dir.join(&file);
     let got = match mode {
         Mode::Look => {
             ui::activity(&format!("reaching {host}"));
@@ -242,9 +484,9 @@ async fn from_url(url: &str, dir: &Path, mode: Mode) -> Result<Ipa> {
         }
         Mode::Get => {
             ui::status(&format!("downloading the IPA from {host}"));
-            download(url, &dir.join(OTHER_IPA))
+            download(url, &path)
                 .await
-                .map(|got| ui::ok(&format!("downloaded the IPA ({})", megabytes(got.size))))
+                .map(|got| ui::ok(&format!("downloaded {file} ({})", megabytes(got.size))))
         }
     };
     got.map_err(|raw| {
@@ -256,28 +498,26 @@ async fn from_url(url: &str, dir: &Path, mode: Mode) -> Result<Ipa> {
             raw,
         )
     })?;
-    Ok(Ipa {
-        path: dir.join(OTHER_IPA),
-        release: None,
-        github: false,
-    })
+    let mut ipa = Ipa::own(path);
+    ipa.title = file;
+    Ok(ipa)
 }
 
 /// The kept release, while its file is still the size its description says
 /// and an IPA.
-fn kept(dir: &Path) -> Option<Kept> {
-    let text = std::fs::read_to_string(dir.join(KEPT_INFO)).ok()?;
+fn kept(dir: &Path, app: &Release) -> Option<Kept> {
+    let text = std::fs::read_to_string(dir.join(app.info())).ok()?;
     let kept: Kept = serde_json::from_str(&text).ok()?;
-    let ipa = dir.join(KEPT_IPA);
+    let ipa = dir.join(app.ipa());
     let size = std::fs::metadata(&ipa).ok()?.len();
     (size == kept.size && is_zip(&ipa).unwrap_or(false)).then_some(kept)
 }
 
 /// Describe the kept release. Through a temporary file, so a description is
 /// always whole.
-fn keep(dir: &Path, kept: &Kept) -> std::io::Result<()> {
-    let path = dir.join(KEPT_INFO);
-    let part = dir.join(format!("{KEPT_INFO}.part"));
+fn keep(dir: &Path, app: &Release, kept: &Kept) -> std::io::Result<()> {
+    let path = dir.join(app.info());
+    let part = dir.join(format!("{}.part", app.info()));
     let text = serde_json::to_vec_pretty(kept).map_err(std::io::Error::other)?;
     std::fs::write(&part, text)?;
     std::fs::rename(&part, &path)
@@ -642,7 +882,7 @@ mod tests {
         assert_eq!(ipa.name(), "SideInstaller 2.1.1");
         assert_eq!(std::fs::read(&ipa.path).unwrap(), ipa_bytes("v2.1.1"));
         let dir = home.join("downloads");
-        let kept = kept(&dir).unwrap();
+        let kept = kept(&dir, &SIDEINSTALLER).unwrap();
         assert_eq!(kept.release, "v2.1.1");
         assert_eq!(kept.size, ipa_bytes("v2.1.1").len() as u64);
         assert_eq!(
@@ -674,7 +914,7 @@ mod tests {
             .unwrap();
         assert_eq!(ipa.release.as_deref(), Some("v2.1.1"));
         assert_eq!(std::fs::read(&ipa.path).unwrap(), ipa_bytes("v2.1.1"));
-        assert_eq!(kept(&home.join("downloads")).unwrap().release, "v2.1.1");
+        assert_eq!(kept(&home.join("downloads"), &SIDEINSTALLER).unwrap().release, "v2.1.1");
         assert_eq!(gets.load(Ordering::SeqCst), 1);
     }
 
@@ -740,7 +980,7 @@ mod tests {
         assert_eq!(ipa.release.as_deref(), Some("v2.1.0"));
         assert!(ipa.github);
         assert_eq!(std::fs::read(&ipa.path).unwrap(), ipa_bytes("v2.1.0"));
-        assert_eq!(kept(&home.join("downloads")).unwrap().release, "v2.1.0");
+        assert_eq!(kept(&home.join("downloads"), &SIDEINSTALLER).unwrap().release, "v2.1.0");
 
         let fresh = self::home("fallback-none");
         let fail = get_from(None, &fresh, Mode::Get, &latest(&base))
@@ -799,7 +1039,7 @@ mod tests {
         assert_eq!(ipa.release.as_deref(), Some("v2.1.1"));
         assert!(ipa.github);
         assert_eq!(gets.load(Ordering::SeqCst), 0);
-        assert!(kept(&home.join("downloads")).is_none());
+        assert!(kept(&home.join("downloads"), &SIDEINSTALLER).is_none());
 
         let (gone, _) = github(|_, path| match path {
             "/latest/download/SideInstaller.ipa" => redirect("/download/v2.1.1/SideInstaller.ipa"),
@@ -844,10 +1084,11 @@ mod tests {
             .unwrap();
         assert_eq!(ipa.release, None);
         assert!(!ipa.github);
-        assert!(ipa.path.ends_with("downloads/other.ipa"));
+        assert!(ipa.path.ends_with("library/Custom.ipa"));
+        assert_eq!(ipa.name(), "Custom.ipa");
         assert_eq!(std::fs::read(&ipa.path).unwrap(), ipa_bytes("custom"));
         let dir = home.join("downloads");
-        assert_eq!(kept(&dir).unwrap().release, "v2.1.1");
+        assert_eq!(kept(&dir, &SIDEINSTALLER).unwrap().release, "v2.1.1");
         assert_eq!(
             std::fs::read(dir.join("SideInstaller.ipa")).unwrap(),
             ipa_bytes("v2.1.1")
@@ -875,7 +1116,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ipa.path, own);
-        assert_eq!(ipa.name(), "your IPA");
+        assert_eq!(ipa.name(), "Mine.ipa");
         assert!(!ipa.github);
         let missing = home.join("missing.ipa");
         assert!(get_from(
@@ -886,6 +1127,113 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn each_app_is_kept_apart() {
+        let home = home("apps");
+        let (base, _) = releases("v2.1.1").await;
+        get_from(None, &home, Mode::Get, &latest(&base)).await.unwrap();
+        let (store, _) = github(|_, path| match path {
+            "/latest/download/SideStore.ipa" => redirect("/download/0.6.2/SideStore.ipa"),
+            "/download/0.6.2/SideStore.ipa" => file(ipa_bytes("store")),
+            _ => status("404 Not Found"),
+        })
+        .await;
+        let url = format!("{store}/latest/download/SideStore.ipa");
+        let ipa = get_app(None, &home, Mode::Get, &SIDESTORE, &url).await.unwrap();
+        assert_eq!(ipa.name(), "SideStore 0.6.2");
+        assert!(ipa.path.ends_with("downloads/SideStore.ipa"));
+        let dir = home.join("downloads");
+        assert_eq!(kept(&dir, &SIDESTORE).unwrap().release, "0.6.2");
+        assert_eq!(kept(&dir, &SIDEINSTALLER).unwrap().release, "v2.1.1");
+        assert_eq!(std::fs::read(dir.join("SideInstaller.ipa")).unwrap(), ipa_bytes("v2.1.1"));
+    }
+
+    #[tokio::test]
+    async fn a_nightly_is_downloaded_every_run_and_kept_for_when_github_is_blocked() {
+        let home = home("nightly");
+        let (base, gets) = github(|_, path| match path {
+            "/download/nightly/SideStore.ipa" => file(ipa_bytes("nightly")),
+            _ => status("404 Not Found"),
+        })
+        .await;
+        let url = format!("{base}/download/nightly/SideStore.ipa");
+        for _ in 0..2 {
+            let ipa = get_app(None, &home, Mode::Get, &SIDESTORE_NIGHTLY, &url)
+                .await
+                .unwrap();
+            assert_eq!(ipa.name(), "SideStore nightly");
+            assert!(ipa.github);
+            assert!(ipa.path.ends_with("downloads/SideStore-nightly.ipa"));
+        }
+        assert_eq!(gets.load(Ordering::SeqCst), 2);
+        let blocked = blocked().await;
+        let ipa = get_app(None, &home, Mode::Get, &SIDESTORE_NIGHTLY, &blocked)
+            .await
+            .unwrap();
+        assert!(!ipa.github);
+        assert_eq!(std::fs::read(&ipa.path).unwrap(), ipa_bytes("nightly"));
+
+        let fresh = self::home("nightly-fresh");
+        let fail = get_app(None, &fresh, Mode::Get, &SIDESTORE_NIGHTLY, &blocked)
+            .await
+            .unwrap_err();
+        assert!(fail.advice.starts_with("Couldn't download SideStore nightly"), "{}", fail.advice);
+        // `check` downloads nothing.
+        let looked = get_app(None, &fresh, Mode::Look, &SIDESTORE_NIGHTLY, &url)
+            .await
+            .unwrap();
+        assert!(looked.github);
+        assert!(!looked.path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_pinned_file_is_taken_only_by_its_hash() {
+        let bytes = ipa_bytes("lc");
+        let sha = hex::encode(Sha256::digest(&bytes));
+        let pinned: &'static str = Box::leak(sha.into_boxed_str());
+        let app: &'static Release = Box::leak(Box::new(Release {
+            name: "LiveContainer + SideStore",
+            kept: "LiveContainer+SideStore",
+            url: "",
+            track: Track::Pinned(pinned),
+        }));
+        let home = home("pinned");
+        let (base, gets) = github(|_, path| match path {
+            "/lc.ipa" => file(ipa_bytes("lc")),
+            "/other.ipa" => file(ipa_bytes("other")),
+            _ => status("404 Not Found"),
+        })
+        .await;
+        let wrong = get_app(None, &home, Mode::Get, app, &format!("{base}/other.ipa"))
+            .await
+            .unwrap_err();
+        assert!(wrong.advice.contains("isn't the file siboot installs"), "{}", wrong.advice);
+        assert!(!home.join("downloads/LiveContainer+SideStore.ipa").exists());
+
+        let ipa = get_app(None, &home, Mode::Get, app, &format!("{base}/lc.ipa"))
+            .await
+            .unwrap();
+        assert_eq!(ipa.name(), "LiveContainer + SideStore");
+        assert_eq!(std::fs::read(&ipa.path).unwrap(), bytes);
+        assert_eq!(gets.load(Ordering::SeqCst), 2);
+        // Kept: GitHub isn't asked again, even blocked.
+        let again = get_app(None, &home, Mode::Get, app, &blocked().await)
+            .await
+            .unwrap();
+        assert_eq!(again.path, ipa.path);
+        assert_eq!(gets.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_releases_siboot_knows() {
+        for app in [&SIDEINSTALLER, &SIDESTORE, &SIDESTORE_NIGHTLY, &LIVECONTAINER] {
+            assert!(app.url.starts_with("https://github.com/"), "{}", app.url);
+            assert!(app.url.ends_with(&app.ipa()) || app.track != Track::Latest);
+        }
+        assert_eq!(tag_of(SIDESTORE.url), None, "latest is resolved by GitHub's redirect");
+        assert!(matches!(LIVECONTAINER.track, Track::Pinned(sha) if sha.len() == 64));
     }
 
     #[test]
@@ -909,27 +1257,27 @@ mod tests {
     #[test]
     fn a_kept_release_must_still_be_what_it_says() {
         let dir = home("described");
-        assert_eq!(kept(&dir), None);
+        assert_eq!(kept(&dir, &SIDEINSTALLER), None);
         let bytes = ipa_bytes("v2.1.1");
-        std::fs::write(dir.join(KEPT_IPA), &bytes).unwrap();
-        assert_eq!(kept(&dir), None, "no description");
+        std::fs::write(dir.join("SideInstaller.ipa"), &bytes).unwrap();
+        assert_eq!(kept(&dir, &SIDEINSTALLER), None, "no description");
         let described = Kept {
             release: "v2.1.1".into(),
             size: bytes.len() as u64,
             sha256: "ab".into(),
         };
-        keep(&dir, &described).unwrap();
-        assert_eq!(kept(&dir), Some(described.clone()));
+        keep(&dir, &SIDEINSTALLER, &described).unwrap();
+        assert_eq!(kept(&dir, &SIDEINSTALLER), Some(described.clone()));
         assert!(!dir.join("SideInstaller.json.part").exists());
 
-        std::fs::write(dir.join(KEPT_IPA), &bytes[..100]).unwrap();
-        assert_eq!(kept(&dir), None, "another size");
+        std::fs::write(dir.join("SideInstaller.ipa"), &bytes[..100]).unwrap();
+        assert_eq!(kept(&dir, &SIDEINSTALLER), None, "another size");
         let mut page = b"<html>".to_vec();
         page.resize(bytes.len(), b' ');
-        std::fs::write(dir.join(KEPT_IPA), &page).unwrap();
-        assert_eq!(kept(&dir), None, "not an IPA");
-        std::fs::write(dir.join(KEPT_IPA), &bytes).unwrap();
-        std::fs::write(dir.join(KEPT_INFO), "{\"release\":").unwrap();
-        assert_eq!(kept(&dir), None, "an unreadable description");
+        std::fs::write(dir.join("SideInstaller.ipa"), &page).unwrap();
+        assert_eq!(kept(&dir, &SIDEINSTALLER), None, "not an IPA");
+        std::fs::write(dir.join("SideInstaller.ipa"), &bytes).unwrap();
+        std::fs::write(dir.join("SideInstaller.json"), "{\"release\":").unwrap();
+        assert_eq!(kept(&dir, &SIDEINSTALLER), None, "an unreadable description");
     }
 }

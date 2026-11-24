@@ -5,7 +5,7 @@
 //! which carries everything to this iPhone. `siboot check` also says whether
 //! this Open Minis can pair the iPhone.
 //!
-//! SideInstaller is downloaded here, before the iPhone is dialed
+//! The app to install is downloaded here, before the iPhone is dialed
 //! (download.rs): where GitHub is blocked, the VPN that reaches it is on until
 //! then, and LocalDevVPN only from then on. When nothing answers at the
 //! iPhone's address after that, siboot asks for LocalDevVPN and dials again.
@@ -52,13 +52,13 @@ pub struct Checked {
     pub ipa: Option<Ipa>,
 }
 
-/// Asked for when nothing answers at the iPhone's address once SideInstaller
-/// is here: no VPN carries it, or one that isn't LocalDevVPN, like one that
+/// Asked for when nothing answers at the iPhone's address once the app to
+/// install is here: no VPN carries it, or one that isn't LocalDevVPN, like one that
 /// reaches GitHub where it's blocked.
 const SWITCH_TITLE: &str = "Connect LocalDevVPN";
 const SWITCH_STEPS: [&str; 2] = [
     "Open LocalDevVPN and connect it. iOS runs one VPN at a time, so it takes the place of any \
-     other: siboot has SideInstaller already, and doesn't need GitHub again.",
+     other: siboot has the app to install already, and doesn't need GitHub again.",
     "Come back to Minis once LocalDevVPN shows Connected.",
 ];
 

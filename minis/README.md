@@ -1,8 +1,12 @@
 # siboot for Open Minis
 
-Installs SideInstaller onto the iPhone it runs on, signed with your own Apple
-Account, from the Linux shell of [Open Minis](https://apps.apple.com/app/id6759188481)
-(free, App Store): no computer, no certificate, no other app to pair with. Since
+Installs SideInstaller, SideStore, LiveContainer + SideStore or an .ipa of your
+own onto the iPhone it runs on ([below](#what-it-installs)), signed with your
+own Apple Account, from the Linux shell of [Open Minis](https://apps.apple.com/app/id6759188481)
+(free, App Store): no computer, no certificate, no other app to pair with. This
+is Vladislav-VB's fork of [FrizzleM/siboot](https://github.com/FrizzleM/siboot):
+the menu, the .ipa picked on the page, and the hand-over to apps other than
+SideInstaller are its own. Since
 Open Minis 1.16 (App Store, 2026-11-14) siboot pairs the iPhone with itself too
 ([below](#pairing-in-minis)), so it needs 1.16 or later.
 
@@ -12,13 +16,19 @@ Needs iOS 27 or later, Developer Mode on, Wi-Fi, LocalDevVPN (App Store)
 connected, and Open Minis 1.16 or later. Then, in Open Minis's terminal:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/FrizzleM/siboot/main/minis/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/Vladislav-VB/siboot/main/minis/install.sh | sh
 ```
 
-Where GitHub is blocked, see [below](#where-github-is-blocked).
+Where GitHub is blocked, see [below](#where-github-is-blocked). From another
+branch, give it to the script too, so siboot comes from the same one:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/Vladislav-VB/siboot/BRANCH/minis/install.sh | SIBOOT_REF=BRANCH sh
+```
 
 siboot opens a page over the terminal, in Minis's own browser
-([below](#the-page)), that shows each step and asks its questions. The first
+([below](#the-page)), that shows each step and asks its questions. It first
+asks what to install ([below](#what-it-installs)). The first
 time, it pairs this iPhone with itself: the page says what to do, and when you
 tap **Start pairing**, open Settings › Privacy & Security › Developer Mode,
 scroll to the bottom, tap **Pair with siboot**, and enter your passcode, then
@@ -33,7 +43,8 @@ the Apple Accounts that signed in before, and asks for no password or code
 while Apple's sign-in lasts ([below](#saved-apple-accounts)). Keep Minis open until siboot
 says it's done: iOS pauses it in the background. The first time, trust your
 Apple Account in Settings › General › VPN & Device Management. Free accounts'
-apps last 7 days; SideInstaller can renew itself from then on. A paid team's
+apps last 7 days; SideInstaller and SideStore can renew themselves from then
+on, and an .ipa of your own is renewed by installing it again. A paid team's
 last a year.
 
 In Open Minis 1.15 or older siboot stops at once and says to update Minis from
@@ -51,6 +62,71 @@ where GitHub doesn't answer, checks it against the SHA-256 the script carries,
 keeps it at `~/.siboot/bin/siboot` (and `/usr/local/bin/siboot`), and runs it.
 After that, `siboot` on its own runs it again without downloading.
 
+## What it installs
+
+Before step 1, siboot asks **What should siboot install?**
+([`src/apps.rs`](src/apps.rs)):
+
+| Choice | Where it comes from | Step 7 hands it |
+|---|---|---|
+| **SideInstaller** | FrizzleM/SideInstaller's latest release, as before | the pairing, where it keeps its own, marked imported |
+| **SideStore**, then **Nightly** or **Stable** | SideStore/SideStore's `nightly` tag (downloaded each run), or its latest release | the pairing as `ALTPairingFile.mobiledevicepairing`, as `PairingFile_RemoteRP.plist` with `isPairingReset` off and `activePairingProtocol` set, and its anisette set to "SideStore (New)" |
+| **LiveContainer + SideStore** | the copy SideInstaller installs while GitHub hides LiveContainer: LiveContainerMirror's nightly of 18 September 2026, taken only with SHA-256 `bec41bc2…c8de7` | the same, in its built-in SideStore's home (`Documents/SideStore`) |
+| **An .ipa of your own** | a file on this iPhone, a link, one kept from an earlier run, one in a folder mounted in Minis, or a path typed | the pairing where the app reads it, when it's one SideInstaller knows (below); nothing otherwise |
+
+Back, Esc or an empty answer at the first question stops the run; at the
+others it goes back a question. `--app sideinstaller|sidestore|sidestore-nightly|livecontainer`
+or `--ipa PATH|URL` answers it on the command line, and a run with no one to
+ask (no page, no terminal) installs SideInstaller, as before.
+
+Only SideStore's nightly from 20 September 2026 on reads the RPPairing record,
+the only kind a pairing has on iOS 27 (lockdownd hangs up on lockdown records
+through LocalDevVPN from iOS 26.4), so the menu offers it first. Stable
+SideStore, and the SideStore built into the LiveContainer copy, get the file
+too, as SideInstaller hands it to them, but may not connect with it. Neither
+SideStore's `Account.sideconf` (SideInstaller's certificate, handed over so
+SideStore doesn't make its own) nor AltStore and Madeira are handled yet.
+
+**An .ipa of your own** lists, in this order:
+
+- **Choose a file on this iPhone…** (on the page only): the page's **Choose
+  .ipa** opens iOS's file picker (Files, iCloud Drive, On My iPhone). The file
+  goes to siboot over this iPhone's loopback (`upload`, below) and is kept in
+  `~/.siboot/library` under its own name, made safe for a file name.
+- **Download one from a link…**: an `https://` link to the .ipa. It's
+  downloaded in step 1 into `~/.siboot/library` too.
+- The .ipa files kept in `~/.siboot/library`, the newest first (eight at
+  most), so renewing an app is picking it again.
+- The .ipa files in the folders mounted in Minis (Minis › Settings › Mount
+  External Folders, under `/var/minis/mounts`), two folders deep, with the
+  folder they're in.
+- **Type the path of one in Minis…**
+
+Step 7 goes by the signed app, not by the menu, so an .ipa of SideStore picked
+as a file is handed over as SideStore is ([`src/handover.rs`](src/handover.rs)).
+The apps of iLoader's table that SideInstaller's Pairing page writes into get
+the pairing file in their Documents: Feather, StikDebug (`pairingFile.plist`,
+or `rp_pairing_file.plist` for a sideloaded `com.stik.stikdebug`), StikTest,
+Protokolle, Antrag, SparseBox, StikStore, ByeTunes, Reynard and PanicAnalyzer.
+The box the run ends in has an **Open** button for the app's own URL scheme
+when its Info.plist declares one.
+
+### Sending a file from the page
+
+A file picked on the page goes to `upload?id=N&name=NAME` as the request's
+body ([`src/web.rs`](src/web.rs)), with the same guards as an answer, and
+more:
+
+- Only while a question asks for a file, for that question's id, one at a
+  time; anything else is refused (409), and so is a plain answer naming a
+  path.
+- `Content-Type: application/octet-stream` only: no form on another site can
+  send that without a preflight, which is refused. From another origin, 403.
+- At most 4 GB, written to a `.part` file as it arrives and renamed only
+  when it's whole and starts as a zip does; anything else is deleted and
+  refused (415), and the page says so. The name is cut to its last part and
+  to letters, digits and a few marks, so it can't leave `~/.siboot/library`.
+
 ## Where GitHub is blocked
 
 siboot comes from GitHub, and so does SideInstaller, and GitHub is blocked in
@@ -66,7 +142,7 @@ So siboot needs GitHub only before that:
   answer, get the script through jsDelivr too:
 
   ```sh
-  wget -qO- https://fastly.jsdelivr.net/gh/FrizzleM/siboot@main/minis/install.sh | sh
+  wget -qO- https://fastly.jsdelivr.net/gh/Vladislav-VB/siboot@main/minis/install.sh | sh
   ```
 
   jsDelivr can be up to 12 hours behind GitHub, so that may install the
@@ -81,9 +157,10 @@ So siboot needs GitHub only before that:
   downloads a newer one. When GitHub doesn't answer at all, it installs the
   kept SideInstaller, and says which version that is. With nothing kept, it
   stops and says how to get it.
-- **An IPA of your own.** `siboot --ipa PATH` installs one from a file, with no
-  download: mount the folder it's in (Minis › Settings › Mount External
-  Folders), and run `siboot --ipa /var/minis/mounts/<folder>/SideInstaller.ipa`.
+- **An IPA of your own.** Picked on the page from this iPhone's files, or in
+  a folder mounted in Minis (Minis › Settings › Mount External Folders), it
+  needs no download: pick it under **An .ipa of your own**, or run
+  `siboot --ipa /var/minis/mounts/<folder>/SideInstaller.ipa`.
 
 Apple's sign-in server and the anisette servers aren't GitHub, but step 4
 reaches them with LocalDevVPN on, so they have to answer without the other
@@ -194,9 +271,9 @@ file is.
 | 2 | Pairing | the file saved in `~/.siboot` on an earlier run, while the iPhone accepts it; else the one siboot-pair offers on `127.0.0.1:61207`, for its transfer code (20 s for each answer), when it's offering; else a new pairing, made here ([below](#pairing-in-minis)); then pair-verified with the iPhone |
 | 3 | Connect | pair-verify → `createListener` → TLS-PSK → CDTunnel → software TCP → RSD, as `tunnel_create_rppairing_multihost` does; lockdownd gives the UDID |
 | 4 | Apple ID | the Apple Account picked from those saved, or typed, and its saved token before any password ([below](#saved-apple-accounts)); then rust-core's `apple_session.rs`, compiled unchanged: saved token first, then GrandSlam + 2FA, Mac-ADI anisette servers in SideInstaller's Auto order; then the team, picked when Apple lists more than one ([below](#more-than-one-team)) |
-| 5 | Sign | the `SideInstaller.ipa` from step 1, signed with isideload's `sign_app` (device registered, app group, no Increased Memory Limit), as Side by Side does |
+| 5 | Sign | the IPA from step 1 ([above](#what-it-installs)), signed with isideload's `sign_app` (device registered, app group, no Increased Memory Limit), as Side by Side does |
 | 6 | Install | AFC upload to `/PublicStaging`, every file checked, `installation_proxy` with `PackageType: Developer` |
-| 7 | Hand over | house_arrest writes the pairing file to `Library/Application Support/rp_pairing_file.plist` and marks it imported (`importedPairingFileName`), as Side by Side hands one to SideInstaller |
+| 7 | Hand over | for SideInstaller, house_arrest writes the pairing file to `Library/Application Support/rp_pairing_file.plist` and marks it imported (`importedPairingFileName`), as Side by Side hands one to SideInstaller; for SideStore, LiveContainer and the other apps SideInstaller knows, where each reads it ([above](#what-it-installs)) |
 
 `siboot check` runs step 1 only, and `siboot connect` steps 1–3.
 `siboot developer-mode` runs steps 1–3 and then asks for Developer Mode
@@ -204,8 +281,10 @@ file is.
 `SIBOOT_APPLE_ID` and `SIBOOT_PASSWORD` skip the prompts. Everything is kept in
 `~/.siboot`: the pairing file (mode 600), isideload's store (signing key,
 anisette identity, saved token), the saved Apple Accounts' emails
-(`apple-accounts`, mode 600) and SideInstaller's latest release
-(`downloads/SideInstaller.ipa`, its version in `SideInstaller.json`). The password is never written
+(`apple-accounts`, mode 600), each app's latest download
+(`downloads/SideInstaller.ipa`, `SideStore.ipa`, `SideStore-nightly.ipa`,
+`LiveContainer+SideStore.ipa`, each described in a `.json` beside it) and the
+.ipa files of your own (`library`). The password is never written
 anywhere.
 
 ## The pairing port
@@ -410,9 +489,21 @@ script's binary:
 
 ```sh
 for f in install.sh bin/siboot-aarch64; do
-  curl -fsS "https://purge.jsdelivr.net/gh/FrizzleM/siboot@main/minis/$f"
+  curl -fsS "https://purge.jsdelivr.net/gh/Vladislav-VB/siboot@main/minis/$f"
 done
 ```
+
+From an x86_64 Linux, [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
+cross-compiles the same static non-PIE binary, with zig as the C compiler for
+aws-lc (`pip install ziglang`, `cargo install cargo-zigbuild`,
+`rustup target add aarch64-unknown-linux-musl`):
+
+```sh
+RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
+  cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
+```
+
+`qemu-aarch64-static` runs it there (`--version`, `--help`).
 
 ## Tests
 
@@ -608,6 +699,28 @@ LocalDevVPN, and `-- blocked` installs the SideInstaller an earlier run kept).
   next, and with raw.githubusercontent.com blocked it installed 0.20.1 from
   fastly.jsdelivr.net. Not run on an iPhone, nor from inside a country that
   blocks GitHub.
+
+- **0.22.0** (this fork) asks what to install before step 1
+  ([above](#what-it-installs)): SideInstaller, SideStore (nightly or stable),
+  LiveContainer + SideStore, or an .ipa of your own, picked on the page from
+  this iPhone's files, from a link, from those kept or mounted, or typed;
+  step 7 hands the pairing to whichever app it is, as SideInstaller does.
+  Tested on Linux x86_64 (152 tests, the new ones on the upload's guards and
+  the safe names, the menu's link and path checks, nightly and pinned
+  downloads against a stand-in for GitHub, which app gets what, SideStore's
+  split RPPairing record and its settings), and the host build with `--web`
+  in Chromium at an iPhone's size: the menu, Back, the file picker refusing a
+  .txt and an .ipa that isn't a zip, then taking one, kept in
+  `~/.siboot/library` and listed the next run; the same menu as plain lines
+  in a pty. The real links answered (SideStore's latest is 0.7.0-alpha), the
+  LiveContainer copy's SHA-256 matched, and the bundle ids of LiveContainer's
+  and SideStore's IPAs are the ones step 7 looks for. The static aarch64
+  build was cross-compiled with cargo-zigbuild and ran `--version` under
+  qemu. Not run on an iPhone: Minis's browser picking a file, signing and
+  installing anything but SideInstaller, and SideStore reading what step 7
+  writes are untested. `pairing::tests::a_closed_player_is_opened_again` is
+  timing-sensitive and fails now and then under a loaded `cargo test`, on
+  0.21.0 too.
 
 Not tested yet: other iPhones and iOS versions, an Apple Account on more than
 one team, one at its certificate or App ID limit (siboot then asks which

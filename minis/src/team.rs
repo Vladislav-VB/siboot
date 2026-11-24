@@ -110,18 +110,37 @@ pub fn found(teams: usize) -> String {
 /// Said before the question.
 pub const NOTE: &str = "A free team's apps last 7 days; a paid team's last a year.";
 
-/// The finish box's line on how long SideInstaller lasts. `first`: signed by
-/// the first team Apple lists. SideInstaller renews itself with that one (its
+/// Who renews an app before a free team's 7 days are up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renewal {
+    /// SideInstaller, which renews itself with the first team Apple lists.
+    SideInstaller,
+    /// SideStore, once it's signed in, with its own sign-in.
+    SideStore,
+    /// Nobody but siboot, run again.
+    Siboot,
+}
+
+/// The finish box's line on how long the app lasts. `first`: signed by the
+/// first team Apple lists. SideInstaller renews itself with that one (its
 /// rust-core takes the first), so it can renew itself in place only then;
 /// otherwise the renewal is running siboot again with the same team.
-pub fn lasts(kind: Kind, first: bool) -> &'static str {
-    match (kind, first) {
-        (Kind::Paid, _) => "A paid team signed it, so it lasts a year.",
-        (_, true) => {
+pub fn lasts(kind: Kind, first: bool, renewal: Renewal) -> &'static str {
+    match (kind, renewal, first) {
+        (Kind::Paid, ..) => "A paid team signed it, so it lasts a year.",
+        (_, Renewal::SideInstaller, true) => {
             "Free accounts' apps last 7 days; SideInstaller can renew itself from then on."
         }
-        (_, false) => {
+        (_, Renewal::SideInstaller, false) => {
             "Free accounts' apps last 7 days. To renew it, run siboot again and pick the same team."
+        }
+        (_, Renewal::SideStore, _) => {
+            "Free accounts' apps last 7 days. Sign in to SideStore with the same Apple Account \
+             before then, and it renews itself and your apps from then on."
+        }
+        (_, Renewal::Siboot, _) => {
+            "Free accounts' apps last 7 days. To renew it, run siboot again and install the same \
+             IPA: one picked or downloaded here stays under An .ipa of your own."
         }
     }
 }
@@ -265,6 +284,7 @@ mod tests {
 
     #[test]
     fn the_finish_box_says_how_long_it_lasts() {
+        let lasts = |kind, first| lasts(kind, first, Renewal::SideInstaller);
         assert_eq!(lasts(Kind::Paid, false), lasts(Kind::Paid, true));
         assert!(lasts(Kind::Paid, true).contains("a year"));
         // The first team is the one SideInstaller renews itself with.

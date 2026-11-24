@@ -1,8 +1,8 @@
 [package]
 name = "siboot"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
-description = "PC-free bootstrap that pairs and installs SideInstaller onto the iPhone it runs on, from Open Minis's Linux shell"
+description = "PC-free bootstrap that pairs this iPhone and installs SideInstaller, SideStore or your own IPA onto it, from Open Minis's Linux shell"
 license = "MIT"
 publish = false
 

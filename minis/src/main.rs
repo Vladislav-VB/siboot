@@ -25,14 +25,17 @@
 //! keeps it in the terminal.
 
 mod account;
+mod apps;
 mod bridge;
 mod devmode;
 mod download;
 mod fail;
 #[cfg(test)]
 mod fake_iphone;
+mod handover;
 mod install;
 mod keepalive;
+mod library;
 mod pairing;
 mod preflight;
 mod report;
@@ -106,6 +109,8 @@ pub struct Args {
     pub home: PathBuf,
     pub pairing_file: Option<PathBuf>,
     pub apple_id: Option<String>,
+    /// What to install (`--app`, or the menu), when it isn't `ipa`.
+    pub app: Option<apps::App>,
     pub ipa: Option<String>,
     pub anisette: Option<String>,
 }
@@ -140,6 +145,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
         home: default_home(),
         pairing_file: None,
         apple_id: None,
+        app: None,
         ipa: None,
         anisette: None,
     };
@@ -170,6 +176,12 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
             "--pairing-file" => args.pairing_file = Some(PathBuf::from(value("--pairing-file")?)),
             "--apple-id" => args.apple_id = Some(value("--apple-id")?),
             "--ipa" => args.ipa = Some(value("--ipa")?),
+            "--app" => {
+                let name = value("--app")?;
+                args.app = Some(apps::App::parse(&name).ok_or(format!(
+                    "--app takes sideinstaller, sidestore, sidestore-nightly or livecontainer, not `{name}`"
+                ))?);
+            }
             "--anisette" => args.anisette = Some(value("--anisette")?),
             "--turn-on" => args.turn_on = true,
             "check" | "connect" | "developer-mode" if !command_seen => {
@@ -186,6 +198,9 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
     if args.turn_on && args.command != Command::DeveloperMode {
         return Err("--turn-on goes with `siboot developer-mode`".into());
     }
+    if args.app.is_some() && args.ipa.is_some() {
+        return Err("--app and --ipa each say what to install: give one".into());
+    }
     Ok(Parsed::Run(args))
 }
 
@@ -198,17 +213,19 @@ fn usage() {
     println!(
         "\
 {name} {VERSION}
-Installs SideInstaller onto this iPhone, from
-Open Minis, with your own Apple Account.
+Installs SideInstaller, SideStore or an IPA
+of your own onto this iPhone, from Open
+Minis, with your own Apple Account.
 
 {usage}
   siboot [command] [options]
 
-  With no command, every step runs: check,
-  pair this iPhone with siboot (in Settings,
-  the first time), connect, sign in, sign
-  SideInstaller, install it, and hand it the
-  pairing.
+  With no command, siboot asks what to
+  install, and every step runs: check, pair
+  this iPhone with siboot (in Settings, the
+  first time), connect, sign in, sign the
+  app, install it, and hand it the pairing
+  when it reads one.
 
 {commands}
   {check}
@@ -234,9 +251,13 @@ Open Minis, with your own Apple Account.
       comes from SIBOOT_PASSWORD or a prompt
       that shows only dots, and only when
       Apple wants it.
+  {app}
+      Install this without asking: sideinstaller,
+      sidestore, sidestore-nightly or
+      livecontainer (with SideStore).
   {ipa}
-      Install this IPA instead of SideInstaller's
-      latest release.
+      Install this IPA, a file or a link,
+      without asking.
   {anisette}
       Sign in through this anisette server only.
   {turn_on}
@@ -283,6 +304,7 @@ Open Minis, with your own Apple Account.
         connect = flag("connect"),
         devmode = flag("developer-mode"),
         apple_id = flag("--apple-id EMAIL"),
+        app = flag("--app NAME"),
         ipa = flag("--ipa PATH|URL"),
         anisette = flag("--anisette URL"),
         turn_on = flag("--turn-on"),
@@ -335,14 +357,7 @@ fn main() -> ExitCode {
     };
     ui::init(args.verbose, args.plain || page.is_some());
     init_logging(args.verbose);
-    ui::header(
-        VERSION,
-        if args.command == Command::DeveloperMode {
-            "Shows Developer Mode, or turns it on."
-        } else {
-            "Installs SideInstaller on this iPhone."
-        },
-    );
+    ui::header(VERSION, &tagline(&args));
     if let Some(url) = &page {
         show_page(url);
     }
@@ -387,6 +402,16 @@ fn main() -> ExitCode {
     };
     ui::close();
     code
+}
+
+/// What this run does, under siboot's name.
+fn tagline(args: &Args) -> String {
+    match (args.command, &args.ipa, args.app) {
+        (Command::DeveloperMode, ..) => "Shows Developer Mode, or turns it on.".into(),
+        (_, Some(_), _) => "Installs your IPA on this iPhone.".into(),
+        (_, None, Some(app)) => format!("Installs {} on this iPhone.", app.name()),
+        _ => "Installs SideInstaller, SideStore or your own IPA on this iPhone.".into(),
+    }
 }
 
 /// Opens the page in Minis's browser, and opens it again whenever return is
@@ -473,6 +498,15 @@ async fn pipeline(args: &Args) -> Result<()> {
     std::fs::create_dir_all(&args.home)
         .map_err(|e| Fail::new(format!("Couldn't create {}.", args.home.display()), e.to_string()))?;
 
+    // What to install is asked before step 1, which gets it.
+    let picked;
+    let args = if args.command == Command::All {
+        picked = apps::pick(args)?;
+        &picked
+    } else {
+        args
+    };
+
     let devmode = args.command == Command::DeveloperMode;
     match args.command {
         Command::All => ui::plan(&STEP_NAMES, STAGES),
@@ -500,7 +534,10 @@ async fn pipeline(args: &Args) -> Result<()> {
         _ => "the iPhone answers".into(),
     });
     if args.command == Command::Check {
-        ui::finish("Ready", &["Run siboot to install SideInstaller."]);
+        ui::finish(
+            "Ready",
+            &["Run siboot to install SideInstaller, SideStore or your own IPA."],
+        );
         return Ok(());
     }
     // The rest dials where the iPhone answered, which isn't the port asked
@@ -546,8 +583,8 @@ async fn pipeline(args: &Args) -> Result<()> {
     let mut session = account::sign_in(args).await?;
     ui::done(&session.team);
 
-    ui::step(5, "Signing SideInstaller for this iPhone");
     let ipa = ipa.ok_or_else(|| Fail::new("siboot has no IPA to sign.", "step 1 got none"))?;
+    ui::step(5, &format!("Signing {} for this iPhone", ipa.name()));
     let signed = sign::sign(&mut session, &ipa.path, &device).await?;
     ui::done(&match &signed.version {
         Some(version) => format!("{} {version} signed", signed.name),
@@ -560,18 +597,29 @@ async fn pipeline(args: &Args) -> Result<()> {
     ui::ok(&format!("{} installed ({})", signed.name, signed.bundle_id));
     ui::done(&format!("installed · {uploaded}"));
 
-    ui::step(7, "Handing SideInstaller the pairing");
-    seed::hand_over(&mut connection, &signed.bundle_id, &pairing_path).await?;
-    ui::done("SideInstaller has the pairing");
+    let target = handover::target(&signed.bundle_id, &signed.name);
+    ui::step(7, &handover::title(target, &signed.name));
+    let handed = handover::hand_over(
+        &mut connection,
+        target,
+        &signed.bundle_id,
+        &signed.name,
+        &pairing_path,
+    )
+    .await?;
+    ui::done(&handed);
 
-    // Its own URL scheme (ios-app/Info.plist): the page's button opens it.
-    ui::link("Open SideInstaller", "sideinstaller://");
+    // Its own URL scheme (SideInstaller's is ios-app/Info.plist's): the
+    // page's button opens it.
+    if let Some(scheme) = &signed.scheme {
+        ui::link(&format!("Open {}", signed.name), &format!("{scheme}://"));
+    }
     ui::finish(
-        "SideInstaller is installed",
+        &format!("{} is installed", signed.name),
         &[
             "Open it from your Home Screen. The first time, iOS asks you to trust your Apple \
              Account: Settings › General › VPN & Device Management.",
-            team::lasts(session.kind, session.first),
+            team::lasts(session.kind, session.first, apps::renewal(target)),
         ],
     );
     Ok(())
@@ -670,6 +718,20 @@ mod tests {
     }
 
     #[test]
+    fn what_to_install_parses() {
+        assert_eq!(parse("").app, None);
+        assert_eq!(parse("--app sidestore").app, Some(apps::App::SideStore));
+        assert_eq!(
+            parse("--app livecontainer").app,
+            Some(apps::App::LiveContainer)
+        );
+        assert_eq!(parse("--ipa Delta.ipa").ipa.as_deref(), Some("Delta.ipa"));
+        assert_eq!(tagline(&parse("--app sidestore-nightly")), "Installs SideStore nightly on this iPhone.");
+        assert_eq!(tagline(&parse("--ipa Delta.ipa")), "Installs your IPA on this iPhone.");
+        assert!(tagline(&parse("")).contains("your own IPA"));
+    }
+
+    #[test]
     fn developer_mode_parses_with_or_without_turn_on() {
         let args = parse("developer-mode");
         assert_eq!(args.command, Command::DeveloperMode);
@@ -690,6 +752,9 @@ mod tests {
             "connect --turn-on",
             "--repair",
             "--advertiser minis",
+            "--app",
+            "--app altstore",
+            "--app sidestore --ipa x.ipa",
         ] {
             assert!(parse_args(line.split_whitespace().map(String::from)).is_err(), "{line}");
         }

@@ -30,6 +30,10 @@
 
 #![allow(dead_code)]
 
+#[path = "../src/fail.rs"]
+mod fail;
+#[path = "../src/library.rs"]
+mod library;
 #[path = "../src/saved.rs"]
 mod saved;
 #[path = "../src/team.rs"]
@@ -573,7 +577,7 @@ fn sign_and_install(id: &str, kind: team::Kind, first: bool) -> bool {
         &[
             "Open it from your Home Screen. The first time, iOS asks you to trust your Apple \
              Account: Settings › General › VPN & Device Management.",
-            team::lasts(kind, first),
+            team::lasts(kind, first, team::Renewal::SideInstaller),
         ],
     );
     true

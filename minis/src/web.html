@@ -9,9 +9,10 @@
 <!--
   siboot's run, served by siboot itself on this iPhone's loopback (src/web.rs)
   and shown in Open Minis's browser. It reads the run as server-sent events
-  from `events`, answers siboot's questions by POSTing to `answer`, and stops
-  it with `stop`. Every URL is relative: the page's own path carries the key
-  that lets it in.
+  from `events`, answers siboot's questions by POSTing to `answer`, sends an
+  .ipa picked from this iPhone's files to `upload` when siboot asks for one,
+  and stops it with `stop`. Every URL is relative: the page's own path
+  carries the key that lets it in.
 
   The palette, radii and type are SideInstaller's (ios-app/Theme.swift), as on
   sideinstaller.net. Text from siboot only ever goes in through textContent.
@@ -123,6 +124,17 @@ body:not(.details) .step[data-state=done] .item.ok{display:none}
 .ready-step::before{counter-increment:ready; content:counter(ready); flex:none; display:grid; place-items:center; width:22px; height:22px; margin-top:-1px; border-radius:50%; background:var(--control-hover); color:var(--text-2); font-size:13px; font-weight:600}
 .ready-notes{margin-top:10px}
 .ready-note{padding:2px 0 2px 32px; font-size:14px; color:var(--text-2)}
+/* A file from this iPhone (an .ipa), sent to siboot as it's picked. The
+   input sits inside its label, so tapping the button opens the picker
+   without any script. */
+.picker{position:relative; overflow:hidden}
+.picker input{position:absolute; width:1px; height:1px; opacity:0; pointer-events:none}
+.picker[aria-disabled=true]{opacity:.5; pointer-events:none}
+.upload{margin-top:14px}
+.upload .track{height:4px; border-radius:2px; background:var(--control-hover); overflow:hidden}
+.upload-text{margin-top:8px; font:400 13px/1.4 var(--mono); font-variant-numeric:tabular-nums; color:var(--text-2); overflow-wrap:anywhere}
+.upload-text.warn{font-family:var(--sans); font-size:14px; color:var(--text)}
+.upload-text.warn::before{content:"▲  "; color:var(--warning)}
 
 /* ---------- the pairing code, while Settings waits for it ---------- */
 
@@ -508,6 +520,81 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
       }
       actions.append(button(e.button || "Start", "primary", "button", () => send({ go: true })));
       actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
+    } else if (e.kind === "file") {
+      if ((e.notes || []).length) {
+        const notes = make("ul", "hints");
+        for (const note of e.notes) notes.append(make("li", "hint", note));
+        askEl.append(notes);
+      }
+      const box = make("div", "upload");
+      const track = make("div", "track");
+      const fill = make("div", "fill");
+      track.append(fill);
+      const text = make("p", "upload-text");
+      box.append(track, text);
+      box.hidden = true;
+      askEl.append(box);
+      let sending = null;
+      const say = (line, warn) => {
+        box.hidden = false;
+        track.hidden = !!warn;
+        text.className = warn ? "upload-text warn" : "upload-text";
+        text.textContent = line;
+      };
+      const picker = make("label", "button primary picker", e.button || "Choose file");
+      const input = make("input");
+      input.type = "file";
+      picker.append(input);
+      const ready = (on) => picker.setAttribute("aria-disabled", on ? "false" : "true");
+      input.addEventListener("change", () => {
+        const file = input.files && input.files[0];
+        input.value = "";
+        if (!file || sending) return;
+        if (!/\.ipa$/i.test(file.name)) {
+          say("“" + file.name + "” isn't an .ipa. Pick a file whose name ends in .ipa.", true);
+          return;
+        }
+        const id = e.id;
+        const request = new XMLHttpRequest();
+        sending = request;
+        ready(false);
+        fill.style.width = "0%";
+        say("Sending " + file.name + " to siboot…");
+        request.open("POST", "upload?id=" + id + "&name=" + encodeURIComponent(file.name));
+        request.setRequestHeader("Content-Type", "application/octet-stream");
+        request.upload.onprogress = (p) => {
+          if (!p.lengthComputable || !p.total) return;
+          fill.style.width = Math.floor((p.loaded * 100) / p.total) + "%";
+          say("Sending " + file.name + " · " + mb(p.loaded) + " of " + mb(p.total) + " MB");
+        };
+        const after = (line) => {
+          if (sending !== request) return;
+          sending = null;
+          if (!asking || asking.id !== id) return;
+          ready(true);
+          if (line) say(line, true);
+        };
+        request.onload = () => {
+          if (request.status === 204) {
+            fill.style.width = "100%";
+            say(file.name + " is with siboot.");
+            sending = null;
+            return;
+          }
+          after(request.status === 415 ? "That file doesn't open as an .ipa. Pick another."
+            : request.status === 413 ? "That file is too big to be an app siboot can install."
+            : request.status === 409 ? "siboot isn't waiting for a file any more."
+            : "Couldn't send it to siboot (" + request.status + "). Try again.");
+        };
+        request.onerror = () => after("Couldn't reach siboot. It runs in Minis's terminal: is Minis still open?");
+        request.onabort = () => after("");
+        request.send(file);
+      });
+      actions.append(picker);
+      actions.append(button("Cancel", "quiet", "button", () => {
+        if (sending) sending.abort();
+        send({ cancel: true });
+      }));
     } else if (e.kind === "confirm") {
       actions.append(button("Yes", e.default ? "primary" : "secondary", "button", () => send({ yes: true })));
       actions.append(button("No", e.default ? "secondary" : "primary", "button", () => send({ yes: false })));

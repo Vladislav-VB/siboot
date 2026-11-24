@@ -178,7 +178,7 @@ fn install_advice(raw: &str) -> String {
          profile may not include this iPhone."
             .into()
     } else {
-        "installd refused SideInstaller.".into()
+        "installd refused the app.".into()
     }
 }
 
